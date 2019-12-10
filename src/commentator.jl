@@ -1,87 +1,102 @@
 using IRTools
+using IRTools: @dynamo, IR, recurse!, self, Pipe, finish, insertafter!, stmt,
+               xcall, arguments, isreturn, blocks, returnvalue
 using MacroTools
 
-const ROOT_FILE = Symbol(pathof(@__MODULE__))
-const _target_modules = Set{Symbol}()
-
+# @dynamo contexts
+# ----------------
 struct Ctx
   typs::Set{DataType}
-  f2l2t::Dict{Symbol, Dict{Int, String}} # file => line => typ map
+  f2l2t::Dict{Symbol, Dict{Int, String}} # file => line => comment map
 end
 Ctx(typs = [Any]) = Ctx(Set(typs), Dict())
 
-function collectcomment!(ctx::Ctx, lin, v)::Nothing
-  # only comment on specified types
+# constants refered in the @dynamo
+# --------------------------------
+const _TARGET_MODULE = Set{Symbol}()
+
+# comment on each SSA in `ir`
+function add_ssacomments(ir)
+  pr = Pipe(ir)
+  for (v, st) in pr
+    # TODO?: add special rule for some form of ssa
+    lin = pr.from.lines[st.line]
+    x = stmt(xcall(@__MODULE__, :ssacomment!, self, lin, v); line = st.line)
+    insertafter!(pr, v, x)
+  end
+  finish(pr)
+end
+
+# comment on function type
+function add_methodcomment!(ir)
+  m = ir.meta.method
+  # TODO: method calls with default arguments
+  line = m.line - (isshort(ir) ? 0 : 1)
+  args = arguments(ir)[2:end]
+  for b in filter(isreturn, blocks(ir))
+    v = returnvalue(b)
+    ex = stmt(xcall(@__MODULE__, :methodcomment!, self, m, line, v, args...))
+    push!(b, ex)
+  end
+end
+
+isshort(ir) = ir.meta.method.line == ir.lines[end].line
+
+# dynamo
+# ------
+
+@dynamo function (ctx::Ctx)(args...)
+  ir = IR(args...)
+  ir === nothing && return
+
+  # module validity check
+  # NOTE: can't comment on methods that are called from the non-targeted modules
+  Symbol(ir.meta.method.module) ∉ _TARGET_MODULE && return ir
+
+  # recursive IR manipulations
+  recurse!(ir)
+
+  ir = add_ssacomments(ir) # add comment on each SSA
+  add_methodcomment!(ir)   # add comment on function type
+  ir
+end
+
+# comment body
+# ------------
+
+# comment on each SSA
+function ssacomment!(ctx::Ctx, lin, v)
   issubtype(v, ctx.typs) || return
   f = lin.file
   l = lin.line
-  s = typstring(v)
+  s = _comment(v)
   get!(ctx.f2l2t, f, Dict())[l] = s
   nothing
 end
 
-function issubtype(v, typs)
-  t = typeof(v)
-  any((<:).(t, typs))
+# comment on function type
+function methodcomment!(ctx::Ctx, m, l, v, args...)
+  (issubtype(v, ctx.typs) || issubtype(args, ctx.typs)) || return
+  argtyps = _comment(args)
+  rettyp = _comment(v)
+  get!(ctx.f2l2t, m.file, Dict())[l] = string(argtyps, " -> ", rettyp)
+  nothing
 end
+# comment on anon function type
+function methodcomment!(ctx::Ctx, m, l, v)
+  issubtype(v, ctx.typs) || return
+  rettyp = _comment(v)
+  get!(ctx.f2l2t, m.file, Dict())[l] = string("() -> ", rettyp)
+  nothing
+end
+
+issubtype(v, typs) = any((<:).(typeof(v), typs))
 function issubtype(tpl::Tuple, typs)
   ts = typeof.(tpl)
   any(any((<:).(t, typs)) for t in ts)
 end
 
-typstring(v) = string(typeof(v))
-typstring(v::Tuple) = string("(", join(typstring.(v), ", "), ")")
-typstring(v::AbstractArray) = string(typeof(v), ": ", size(v))
-typstring(v::DataType) = string("DataType: ", v)
-
-IRTools.@dynamo function (ctx::Ctx)(args...)
-  ir = IRTools.IR(args...)
-  ir === nothing && return
-
-  for (v, st) in ir
-    isexpr(st.expr, :call) || continue
-    ir[v] = Expr(:call, IRTools.self, st.expr.args...)
-  end
-
-  m = ir.meta.method
-  f = m.file
-  # module validity check
-  Symbol(m.module) ∉ _target_modules && return ir
-  # avoid a function that @comment macro creates
-  f === ROOT_FILE && return ir
-
-  pr = IRTools.Pipe(ir)
-  for (v, st) in pr
-    # rules
-    isexpr(st.expr, :call) && st.expr.args[2] === IRTools.var(1) && continue
-
-    lin = pr.from.lines[st.line]
-    IRTools.insertafter!(pr, v, IRTools.stmt(IRTools.xcall(TypeCommentator, :collectcomment!, IRTools.self, lin, v); line = st.line))
-  end
-  ir = IRTools.finish(pr)
-
-  line = m.line - (isshortmethod(ir) ? 0 : 1)
-  args = IRTools.arguments(ir)[2:end]
-  for b in filter(IRTools.isreturn, IRTools.blocks(ir))
-    v = IRTools.returnvalue(b)
-    IRTools.push!(b, IRTools.stmt(IRTools.xcall(TypeCommentator, :summarycomment!, IRTools.self, m, line, v, args...)))
-  end
-
-  ir
-end
-
-isshortmethod(ir) = ir.meta.method.line == ir.lines[end].line
-
-function summarycomment!(ctx::Ctx, m, l, v, args...)
-  (issubtype(v, ctx.typs) || issubtype(args, ctx.typs)) || return
-  argtyps = typstring(args)
-  rettyp  = typstring(v)
-  get!(ctx.f2l2t, m.file, Dict())[l] = string(argtyps, " -> ", rettyp)
-  nothing
-end
-function summarycomment!(ctx::Ctx, m, l, v)
-  issubtype(v, ctx.typs) || return
-  rettyp = typstring(v)
-  get!(ctx.f2l2t, m.file, Dict())[l] = string("() -> ", rettyp)
-  nothing
-end
+_comment(v) = string(typeof(v))
+_comment(v::Tuple) = string("(", join(_comment.(v), ", "), ")")
+_comment(v::AbstractArray) = string(typeof(v), ": ", size(v))
+_comment(v::DataType) = string("DataType: ", v)

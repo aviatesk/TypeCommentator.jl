@@ -5,12 +5,20 @@ export @comment, stripcomments
 include("commentator.jl")
 include("writer.jl")
 
+const MODSYM = Symbol(@__MODULE__)
+
 function comment(f; mods = [:Main], typs = [Any])
-  empty!(_target_modules)
-  push!(_target_modules, mods...)
+  # initialize target module setting
+  # NOTE: add this module so that the dynamo can recur on the anon functions that `comment` or `@comment` creates
+  empty!(_TARGET_MODULE)
+  push!(_TARGET_MODULE, MODSYM)
+  push!(_TARGET_MODULE, mods...)
+
   ctx = Ctx(typs)
   ret = ctx(() -> f())
+
   writecomments(ctx.f2l2t)
+
   ret
 end
 

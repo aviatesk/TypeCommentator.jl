@@ -1,3 +1,4 @@
+const ROOT_FILE = Symbol(pathof(@__MODULE__))
 const COMMENT_HEAD  = "  #:: "
 const COMMENT_REGEX = r"\s\s#::\s.+$"m
 
@@ -20,6 +21,8 @@ end
 
 function writecomments(f2l2t)
   for f in keys(f2l2t)
+    # NOTE: avoid anon functions that `comment` or `@comment` creates
+    f === ROOT_FILE && continue
     _writecomments(f, f2l2t[f])
   end
 end
@@ -39,8 +42,8 @@ end
 stripcomment(line) = replace(line, COMMENT_REGEX => "")
 
 function stripcomments(path::AbstractString)
-  if !isfile(p)
-    @error fileerrormsg(p)
+  if !isfile(path)
+    @error fileerrormsg(path)
     return
   end
   lines = collect(eachline(path; keep = true))
